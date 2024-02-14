@@ -10,7 +10,6 @@
 
 import argparse
 import base64
-import boto3
 import datetime
 import errno
 import fnmatch
@@ -25,10 +24,11 @@ import threading
 import time
 import zipfile
 from queue import Queue
-from six.moves import input
-from urllib.error import URLError, HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
+import boto3
+from six.moves import input
 
 AWS_SLEEP_INTERVAL = 10  # seconds
 BATCH_WRITE_SLEEP_INTERVAL = 0.15  # seconds
@@ -665,6 +665,7 @@ def do_backup(
     table_queue=None,
     src_table=None,
     filter_option=None,
+    key_option=None,
     limit=None,
 ):
     """
@@ -726,9 +727,16 @@ def do_backup(
                             optional_args["ExclusiveStartKey"] = last_evaluated_key
                         if filter_option is not None:
                             optional_args.update(filter_option)
-                        scanned_table = dynamo.scan(
-                            TableName=table_name, **optional_args
-                        )
+                        elif key_option is not None:
+                            optional_args.update(key_option)
+                        if key_option is not None:
+                            scanned_table = dynamo.query(
+                                TableName=table_name, **optional_args
+                            )
+                        else:
+                            scanned_table = dynamo.scan(
+                                TableName=table_name, **optional_args
+                            )
                     except dynamo.exceptions.ProvisionedThroughputExceededException:
                         logging.error(
                             "EXCEEDED THROUGHPUT ON TABLE "
@@ -1281,6 +1289,11 @@ def main():
         "--filterOption",
         help="Filter option for backup, JSON file of which keys are ['FilterExpression', 'ExpressionAttributeNames', 'ExpressionAttributeValues']",
     )
+    parser.add_argument(
+        "-k",
+        "--keyOption",
+        help="Key option for backup, JSON file of which keys are ['KeyConditionExpression', 'ExpressionAttributeNames', 'ExpressionAttributeValues']",
+    )
     args = parser.parse_args()
 
     # set log level
@@ -1347,6 +1360,22 @@ def main():
             ):
                 raise Exception("Invalid filter option format")
 
+    key_option = None
+    if args.keyOption is not None:
+        with open(args.keyOption, "r") as f:
+            key_option = json.load(f)
+            # check if key option contains all required keys
+            all_required_present = all(
+                s in key_option.keys()
+                for s in [
+                    "KeyConditionExpression",
+                    "ExpressionAttributeNames",
+                    "ExpressionAttributeValues",
+                ]
+            )
+            if not all_required_present:
+                raise Exception("Invalid key option format")
+
     # do backup/restore
     start_time = datetime.datetime.now().replace(microsecond=0)
     if args.mode == "backup":
@@ -1379,6 +1408,7 @@ def main():
                     args.read_capacity,
                     table_queue=None,
                     filter_option=filter_option,
+                    key_option=key_option,
                     limit=args.limit,
                 )
             else:
@@ -1387,6 +1417,7 @@ def main():
                     args.read_capacity,
                     matching_backup_tables,
                     filter_option=filter_option,
+                    key_option=key_option,
                     limit=args.limit,
                 )
         except AttributeError:
@@ -1402,6 +1433,7 @@ def main():
                     kwargs={
                         "table_queue": q,
                         "filter_option": filter_option,
+                        "key_option": key_option,
                         "limit": args.limit,
                     },
                 )
